@@ -52,91 +52,98 @@ struct ExtractedFile {
     index: usize,
 }
 
-fn extract_files(
-    zip_file: &File,
-    output_dir: &PathBuf,
-    progress: bool,
-) -> Result<(), ExtractError> {
-    let mut archive = zip::ZipArchive::new(zip_file)?;
+struct ZipExtractor<'a> {
+    archive: zip::ZipArchive<&'a File>,
+    output_dir: PathBuf,
+    progress_bar: Option<ProgressBar>,
+}
 
-    let total_files = archive.len();
-    let progress_bar = if progress {
-        let pb = ProgressBar::new(total_files as u64);
-        pb.set_style(
-            ProgressStyle::default_bar()
-                .template("{msg} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})")
-                .unwrap(),
-        );
-        pb.set_message("Extracting files...");
-        Some(pb)
-    } else {
-        None
-    };
-
-    let extracted_files = (0..total_files)
-        .filter_map(|i| {
-            let file = archive.by_index(i).ok()?;
-            let outpath = match file.enclosed_name() {
-                Some(path) => output_dir.join(path),
-                None => return None,
-            };
-
-            let kind = if (*file.name()).ends_with('/') {
-                FileKind::Directory
-            } else {
-                FileKind::File { size: file.size() }
-            };
-
-            Some(ExtractedFile {
-                path: outpath,
-                kind,
-                index: i,
-            })
+impl<'a> ZipExtractor<'a> {
+    fn new(zip_file: &'a File, output_dir: PathBuf, progress: bool) -> Result<Self, ExtractError> {
+        let archive = zip::ZipArchive::new(zip_file)?;
+        let progress_bar = if progress {
+            let pb = ProgressBar::new(archive.len() as u64);
+            pb.set_style(
+                ProgressStyle::default_bar()
+                    .template("{msg} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})")
+                    .unwrap(),
+            );
+            pb.set_message("Extracting files...");
+            Some(pb)
+        } else {
+            None
+        };
+        Ok(Self {
+            archive,
+            output_dir,
+            progress_bar,
         })
-        .collect::<Vec<_>>();
-
-    if let Some(pb) = &progress_bar {
-        pb.finish_with_message(format!("Extracted {} files", total_files));
     }
 
-    for extracted_file in extracted_files {
-        match extracted_file.kind {
-            FileKind::Directory => {
-                let dir_path = extracted_file.path;
-                fs::create_dir_all(&dir_path)?;
-            }
-            FileKind::File { size } => {
-                let file_path = extracted_file.path;
-                let parent_dir = file_path.parent().unwrap();
-                fs::create_dir_all(&parent_dir)?;
+    fn extract(&mut self) -> Result<Vec<ExtractedFile>, ExtractError> {
+        let extracted_files = (0..self.archive.len())
+            .filter_map(|i| {
+                let file = self.archive.by_index(i).ok()?;
+                let outpath = match file.enclosed_name() {
+                    Some(path) => self.output_dir.join(path),
+                    None => return None,
+                };
 
-                let mut file = fs::File::create(&file_path)?;
-                let mut zip_file = archive.by_index(extracted_file.index)?;
-                io::copy(&mut zip_file, &mut file)?;
+                let kind = if (*file.name()).ends_with('/') {
+                    FileKind::Directory
+                } else {
+                    FileKind::File { size: file.size() }
+                };
 
-                if let Some(pb) = &progress_bar {
-                    pb.inc(1);
-                    pb.set_message(format!("Extracted {:?}", file_path));
+                Some(ExtractedFile {
+                    path: outpath,
+                    kind,
+                    index: i,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        if let Some(pb) = &mut self.progress_bar {
+            pb.finish_with_message(format!("Extracted {} files", extracted_files.len()));
+        }
+
+        for extracted_file in &extracted_files {
+            match extracted_file.kind {
+                FileKind::Directory => {
+                    let dir_path = &extracted_file.path;
+                    if !dir_path.exists() {
+                        fs::create_dir_all(dir_path)?;
+                    }
+                }
+                FileKind::File { .. } => {
+                    let outpath = &extracted_file.path;
+                    let mut outfile = fs::File::create(outpath)?;
+                    let mut reader = self.archive.by_index(extracted_file.index)?;
+                    io::copy(&mut reader, &mut outfile)?;
                 }
             }
+            if let Some(pb) = &mut self.progress_bar {
+                pb.inc(1);
+            }
         }
-    }
 
+        Ok(extracted_files)
+    }
+}
+
+fn extract(opt: Opt) -> Result<(), ExtractError> {
+    let output_dir = opt
+        .output_dir
+        .unwrap_or_else(|| PathBuf::from(".").join(opt.input.file_stem().unwrap()));
+    let zip_file = File::open(opt.input)?;
+    let mut extractor = ZipExtractor::new(&zip_file, output_dir, opt.progress)?;
+    extractor.extract()?;
     Ok(())
 }
 
-fn main() -> Result<(), ExtractError> {
+fn main() {
     let opt = Opt::from_args();
-
-    let output_dir = opt.output_dir.unwrap_or_else(|| {
-        let input_path = &opt.input;
-        let output_path = input_path.with_extension("");
-        output_path
-    });
-
-    let zip_file = File::open(opt.input)?;
-
-    extract_files(&zip_file, &output_dir, opt.progress)?;
-
-    Ok(())
+    if let Err(err) = extract(opt) {
+        eprintln!("Error: {:?}", err);
+    }
 }
