@@ -81,6 +81,13 @@ impl<'a> ZipExtractor<'a> {
     }
 
     fn extract(&mut self) -> Result<Vec<ExtractedFile>, ExtractError> {
+        let extracted_files = self.get_extracted_files()?;
+        self.write_extracted_files(&extracted_files)?;
+        self.finish_progress_bar(&extracted_files)?;
+        Ok(extracted_files)
+    }
+
+    fn get_extracted_files(&mut self) -> Result<Vec<ExtractedFile>, ExtractError> {
         let extracted_files = (0..self.archive.len())
             .filter_map(|i| {
                 let file = self.archive.by_index(i).ok()?;
@@ -103,11 +110,14 @@ impl<'a> ZipExtractor<'a> {
             })
             .collect::<Vec<_>>();
 
-        if let Some(pb) = &mut self.progress_bar {
-            pb.finish_with_message(format!("Extracted {} files", extracted_files.len()));
-        }
+        Ok(extracted_files)
+    }
 
-        for extracted_file in &extracted_files {
+    fn write_extracted_files(
+        &mut self,
+        extracted_files: &Vec<ExtractedFile>,
+    ) -> Result<(), ExtractError> {
+        for extracted_file in extracted_files {
             match extracted_file.kind {
                 FileKind::Directory => {
                     let dir_path = &extracted_file.path;
@@ -122,12 +132,24 @@ impl<'a> ZipExtractor<'a> {
                     io::copy(&mut reader, &mut outfile)?;
                 }
             }
+
             if let Some(pb) = &mut self.progress_bar {
                 pb.inc(1);
             }
         }
 
-        Ok(extracted_files)
+        Ok(())
+    }
+
+    fn finish_progress_bar(
+        &mut self,
+        extracted_files: &Vec<ExtractedFile>,
+    ) -> Result<(), ExtractError> {
+        if let Some(pb) = &mut self.progress_bar {
+            pb.finish_with_message(format!("Extracted {} files", extracted_files.len()));
+        }
+
+        Ok(())
     }
 }
 
